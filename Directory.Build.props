@@ -1,0 +1,21 @@
+<Project>
+
+  <PropertyGroup>
+    <Product>Lyrics Sync for Arcanist</Product>
+    <Version>0.1.0-alpha.1</Version>
+    <Authors>LinkFast S.A.</Authors>
+    <Company>LinkFast S.A.</Company>
+    <Copyright>Copyright (C) 2026 LinkFast S.A. and Arcanist contributors</Copyright>
+    <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/linkfast/arcanist-lyrics-sync</RepositoryUrl>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <!-- The Arcanist checkout the extension builds against (its SDK and server come from the server at run time). -->
+    <ArcanistRoot Condition="'$(ArcanistRoot)' == ''">$(MSBuildThisFileDirectory)..\..\Arcanist\</ArcanistRoot>
+    <!-- Never build Arcanist's native libraries for the extension. -->
+    <SkipNativeBuild>true</SkipNativeBuild>
+  </PropertyGroup>
+
+</Project>

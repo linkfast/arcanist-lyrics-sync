@@ -1,0 +1,14 @@
+{
+  "id": "lyrics-sync",
+  "name": "Lyrics Sync",
+  "version": "0.1.0-alpha.1",
+  "description": "Works out the timing of plain lyrics on this server, from the song itself: the voice is separated from the music and recognized with Whisper, then matched to the words.",
+  "author": "LinkFast S.A.",
+  "license": "AGPL-3.0-or-later",
+  "homepage": "https://github.com/linkfast/arcanist-lyrics-sync",
+  "minApiVersion": 1,
+  "assembly": "Arcanist.LyricsSync.dll",
+  "adminPage": {
+    "icon": "/ext/lyrics-sync/icon.svg"
+  }
+}

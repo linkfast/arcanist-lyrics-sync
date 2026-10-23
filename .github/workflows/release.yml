@@ -1,0 +1,44 @@
+name: Release
+
+# Pushing a tag v<version> (with a suffix, such as v0.1.0-alpha.1, it is a pre-release) builds the package and
+# publishes it, with its SHA-256, as a release administrators install from.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ArcanistExtensions/lyrics-sync
+      - uses: actions/checkout@v4
+        with:
+          repository: linkfast/arcanist
+          ref: ${{ vars.ARCANIST_REF || 'main' }}
+          path: Arcanist
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: ArcanistExtensions/lyrics-sync/global.json
+      - name: Package
+        working-directory: ArcanistExtensions/lyrics-sync
+        run: |
+          version="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props | head -n 1)"
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "The tag $GITHUB_REF_NAME does not match the version $version" >&2; exit 1; }
+          sh pack.sh
+      - name: Test
+        working-directory: ArcanistExtensions/lyrics-sync
+        run: dotnet test --project tests/Arcanist.LyricsSync.Tests --artifacts-path artifacts/build
+      - name: Publish
+        working-directory: ArcanistExtensions/lyrics-sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" artifacts/arcanist-lyrics-sync-*.zip artifacts/arcanist-lyrics-sync-*.zip.sha256 \
+            --repo "$GITHUB_REPOSITORY" --title "Lyrics Sync $GITHUB_REF_NAME" --generate-notes $prerelease

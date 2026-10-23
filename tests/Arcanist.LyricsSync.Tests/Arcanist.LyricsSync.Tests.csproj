@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.10.0" />
+    <PackageReference Include="xunit.v3" Version="4.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The server, run in memory as Arcanist's own tests do (their factory and audio fixtures are shared). -->
+    <ProjectReference Include="$(ArcanistRoot)src\Arcanist.Core\Arcanist.Core.csproj" />
+    <Compile Include="$(ArcanistRoot)tests\Arcanist.Core.Tests\ArcanistFactory.cs" Link="Shared\ArcanistFactory.cs" />
+    <Compile Include="$(ArcanistRoot)tests\Arcanist.Core.Tests\Scanning\AudioFixtures.cs" Link="Shared\AudioFixtures.cs" />
+    <!-- Referenced for its pure parts (the aligner); the server loads its own copy, installed as an administrator would. -->
+    <ProjectReference Include="..\..\src\Arcanist.LyricsSync\Arcanist.LyricsSync.csproj" />
+  </ItemGroup>
+
+  <!-- The extension, as installed, beside the tests. -->
+  <Target Name="CopyExtension" AfterTargets="Build">
+    <MSBuild Projects="..\..\src\Arcanist.LyricsSync\Arcanist.LyricsSync.csproj" Targets="GetTargetPath">
+      <Output TaskParameter="TargetOutputs" ItemName="ExtensionAssembly" />
+    </MSBuild>
+    <PropertyGroup>
+      <ExtensionFolder>@(ExtensionAssembly->'%(RootDir)%(Directory)')</ExtensionFolder>
+    </PropertyGroup>
+    <ItemGroup>
+      <ExtensionFiles Include="$(ExtensionFolder)*.dll;$(ExtensionFolder)arcanist-extension.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(ExtensionFiles)" DestinationFolder="$(OutDir)extension" SkipUnchangedFiles="true" />
+  </Target>
+
+  <ItemGroup>
+    <None Include="$(ArcanistRoot)tests\Arcanist.Core.Tests\xunit.runner.json" Link="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

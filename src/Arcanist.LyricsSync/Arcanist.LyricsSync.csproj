@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Arcanist.LyricsSync</RootNamespace>
+    <!-- Its packages beside it, as in the installed extension (the tests install the build). -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Provided by the server at run time, as for any extension. -->
+    <ProjectReference Include="$(ArcanistRoot)src\Arcanist.Extensibility\Arcanist.Extensibility.csproj" Private="false" ExcludeAssets="runtime;native;contentfiles;build" />
+    <ProjectReference Include="$(ArcanistRoot)src\Arcanist.Core\Arcanist.Core.csproj" Private="false" ExcludeAssets="runtime;native;contentfiles;build" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Only their managed parts ship in the package: the native libraries for the server's machine (and the models)
+      are downloaded when the administrator sets the extension up, checked against their SHA-256 (Components.cs).
+    -->
+    <PackageReference Include="Whisper.net" Version="1.9.1" />
+    <PackageReference Include="org.k2fsa.sherpa.onnx" Version="1.13.8" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="arcanist-extension.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <EmbeddedResource Include="icon.svg" LogicalName="icon.svg" />
+  </ItemGroup>
+
+  <!-- The native libraries of every platform the packages bring are left out (see above). -->
+  <Target Name="LeaveOutNatives" AfterTargets="Build;Publish">
+    <RemoveDir Directories="$(OutDir)runtimes;$(PublishDir)runtimes" />
+  </Target>
+
+</Project>
