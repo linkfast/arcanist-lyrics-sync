@@ -13,6 +13,10 @@ out the timing of plain lyrics on your server, from the song itself, so players 
   less than half the lyrics match (another version, another language, a live take), nothing is saved.
 - **In the background, at low priority.** One song at a time, waiting while Arcanist scans or someone listens; the
   songs a listener opens go first. Players get the timing through Arcanist's lyrics API (`syncedSource: ALIGNED`).
+- **Re-sync on request.** A user who may edit tags (`EDIT_METADATA`) can ask for one song to be timed again
+  (`resyncTrackLyrics`, `POST /rest/v1/tracks/{id}/lyrics/resync`; Arcanist 0.1.0-alpha.16 or newer), whatever timing
+  it has (its file's, LRCLib's or one worked out here): it goes before everything else and is tried even if it was
+  tried before. Its timing is replaced only when the words match the singing; otherwise it stays as it was.
 - **Nothing on disk is rewritten.** The timing lives in Arcanist's database; a rescan keeps it while the words stay
   the same.
 

@@ -96,6 +96,76 @@ public sealed class LyricsSyncTests : IAsyncLifetime
         Assert.Equal("ALIGNED", (await LyricsAsync(sung)).GetProperty("syncedSource").GetString());
     }
 
+    [Fact]
+    public async Task A_resync_times_again_what_was_tried_before_and_lyrics_timed_by_their_file()
+    {
+        AudioFixtures.WriteWav(Path.Combine(_music, "sung.wav"), 1, new FixtureTags("Sung", "Band", Lyrics: "First line of words\nSecond line follows"));
+        AudioFixtures.WriteWav(Path.Combine(_music, "timed.wav"), 2,
+            new FixtureTags("Timed", "Band", Lyrics: "[00:01.00]Words in the file\n[00:02.00]Timed by the file"));
+        AudioFixtures.WriteWav(Path.Combine(_music, "kept.wav"), 3,
+            new FixtureTags("Kept", "Band", Lyrics: "[00:01.00]Nobody sings these\n[00:02.00]Words at all"));
+        Heard("Sung", ("First line of words", 4_000), ("Second line follows", 9_500));
+        Heard("Timed", ("Words in the file", 3_000), ("Timed by the file", 7_000));
+        Heard("Kept", ("Something else entirely is heard", 2_000));
+
+        _factory = new ArcanistFactory(new Dictionary<string, string?>
+        {
+            ["Arcanist:Extensions:lyrics-sync:Enabled"] = "true",
+            ["Arcanist:Extensions:lyrics-sync:Transcripts"] = _transcripts,
+        });
+        Directory.CreateDirectory(_factory.DataPath);
+        CopyFolder(Extension, Path.Combine(_factory.DataPath, "extensions", "lyrics-sync"));
+        await _factory.CompleteSetupAsync(new SetupLibrary("Music", [_music]));
+        _admin = await _factory.CreateAuthenticatedClientAsync();
+        await _factory.WaitForScansAsync(_admin);
+
+        var sung = await TrackIdAsync("Sung");
+        Assert.Equal(new[] { 4_000, 9_500 }, await TimesWhenAsync(sung, l => l.GetProperty("synced").ValueKind == JsonValueKind.Array));
+
+        // Sung differently now: tried before with these words, it is only timed again because a user asks.
+        Heard("Sung", ("First line of words", 5_000), ("Second line follows", 12_000));
+        var asked = await ResyncAsync(sung);
+        Assert.True(asked.GetProperty("canResync").GetBoolean());
+        Assert.Equal(new[] { 5_000, 12_000 }, await TimesWhenAsync(sung, l => !l.GetProperty("resyncPending").GetBoolean()));
+
+        // Lyrics timed by their file are timed from the singing in their place.
+        var timed = await TrackIdAsync("Timed");
+        Assert.Equal("EMBEDDED", (await LyricsAsync(timed)).GetProperty("syncedSource").GetString());
+        Assert.True((await ResyncAsync(timed)).GetProperty("resyncPending").GetBoolean());
+        Assert.Equal(new[] { 3_000, 7_000 }, await TimesWhenAsync(timed, l => !l.GetProperty("resyncPending").GetBoolean()));
+        Assert.Equal("ALIGNED", (await LyricsAsync(timed)).GetProperty("syncedSource").GetString());
+
+        // What does not match the singing keeps the timing it had.
+        var kept = await TrackIdAsync("Kept");
+        await ResyncAsync(kept);
+        Assert.Equal(new[] { 1_000, 2_000 }, await TimesWhenAsync(kept, l => !l.GetProperty("resyncPending").GetBoolean()));
+        Assert.Equal("EMBEDDED", (await LyricsAsync(kept)).GetProperty("syncedSource").GetString());
+    }
+
+    private async Task<JsonElement> ResyncAsync(string id)
+    {
+        var response = await _admin.PostAsync($"/rest/v1/tracks/{id}/lyrics/resync", null, Cancel);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<JsonElement>(ArcanistFactory.Json, Cancel);
+    }
+
+    /// <summary>The times of the song's lines once <paramref name="done"/> says so (or after 30 s).</summary>
+    private async Task<int[]> TimesWhenAsync(string id, Func<JsonElement, bool> done)
+    {
+        JsonElement lyrics = default;
+        for (var i = 0; i < 300; i++)
+        {
+            lyrics = await LyricsAsync(id);
+            if (done(lyrics))
+                break;
+            await Task.Delay(100, Cancel);
+        }
+
+        return lyrics.GetProperty("synced") is { ValueKind: JsonValueKind.Array } synced
+            ? synced.EnumerateArray().Select(l => l.GetProperty("timeMs").GetInt32()).ToArray()
+            : [];
+    }
+
     /// <summary>
     /// The installed extension with the real models, loaded in its own context as on a server: runs only with
     /// <c>LYRICS_SYNC_REAL</c> (see <see cref="RealAudioTests"/>, whose downloaded components it reuses).

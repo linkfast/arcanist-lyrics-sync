@@ -139,6 +139,7 @@ public sealed class AlignmentWorker(
     private static readonly TimeSpan Rest = TimeSpan.FromMinutes(30);
 
     private readonly SemaphoreSlim _wake = new(0);
+    private readonly Queue<UntimedLyrics> _resyncs = new();
     private readonly Queue<UntimedLyrics> _requested = new();
     private Guid? _cursor;
 
@@ -207,11 +208,19 @@ public sealed class AlignmentWorker(
         var current = settings.Current;
         if (!host.IsEnabled(LyricsSyncExtension.Id))
             return Set(WorkerState.Off, Rest);
+        // Nothing can be timed until the setup is done: a re-sync a user asked for does not stay pending meanwhile.
         if (recognizer.NeedsSetup && (Components.Platform is null || components.Missing(current).Count > 0))
+        {
+            timing.EndAllResyncs();
             return Set(WorkerState.NotReady, Rest);
+        }
+
         var ffmpegPath = recognizer.NeedsSetup ? (await ffmpeg.GetAsync(cancellationToken))?.Path : "";
         if (ffmpegPath is null)
+        {
+            timing.EndAllResyncs();
             return Set(WorkerState.NoFfmpeg, Rest);
+        }
         if (scans.HasActiveJobs || streams.Active > 0)
             return Set(WorkerState.Paused, Pause);
 
@@ -228,6 +237,9 @@ public sealed class AlignmentWorker(
             var now = time.GetUtcNow().UtcDateTime;
             if (aligned is null)
             {
+                // A re-sync that cannot be matched leaves the timing the song had.
+                if (song.Forced)
+                    timing.EndResync(song.TrackId);
                 attempts.Record(song.TrackId, new Attempt(song.PlainHash, AttemptOutcome.Rejected, now, LyricsAligner.Version));
                 logger.LogInformation("Lyrics Sync could not match the lyrics of {Song} to its singing", Current);
             }
@@ -245,6 +257,8 @@ public sealed class AlignmentWorker(
             // A song that cannot be read or decoded, or native libraries that do not load here: noted, never fatal.
             logger.LogWarning(e, "Lyrics Sync could not time {Song}", Current);
             LastError = $"{Current}: {e.Message}";
+            if (song.Forced)
+                timing.EndResync(song.TrackId);
             attempts.Record(song.TrackId, new Attempt(song.PlainHash, AttemptOutcome.Failed, time.GetUtcNow().UtcDateTime, LyricsAligner.Version,
                 Error: e.Message));
         }
@@ -262,15 +276,21 @@ public sealed class AlignmentWorker(
         return wait;
     }
 
-    /// <summary>The next song: one a listener asked for, or (in the background) the next one left.</summary>
+    /// <summary>
+    /// The next song: one a user asked to re-sync (always tried, whatever was tried before), one a listener asked for,
+    /// or (in the background) the next one left.
+    /// </summary>
     private async Task<UntimedLyrics?> NextAsync(bool background, CancellationToken cancellationToken)
     {
         var now = time.GetUtcNow().UtcDateTime;
         if (timing.TakeRequested() is { Count: > 0 } asked)
         {
             foreach (var song in await timing.FindAsync(asked, cancellationToken))
-                _requested.Enqueue(song);
+                (song.Forced ? _resyncs : _requested).Enqueue(song);
         }
+
+        if (_resyncs.TryDequeue(out var resync))
+            return resync;
 
         while (_requested.TryDequeue(out var requested))
         {
