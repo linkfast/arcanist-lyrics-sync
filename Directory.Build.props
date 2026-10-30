@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <Product>Lyrics Sync for Arcanist</Product>
-    <Version>0.1.0-alpha.2</Version>
+    <Version>0.2.0-alpha.1</Version>
     <Authors>LinkFast S.A.</Authors>
     <Company>LinkFast S.A.</Company>
     <Copyright>Copyright (C) 2026 LinkFast S.A. and Arcanist contributors</Copyright>

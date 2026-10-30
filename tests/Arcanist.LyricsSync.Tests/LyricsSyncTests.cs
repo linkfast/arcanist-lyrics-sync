@@ -142,6 +142,65 @@ public sealed class LyricsSyncTests : IAsyncLifetime
         Assert.Equal("EMBEDDED", (await LyricsAsync(kept)).GetProperty("syncedSource").GetString());
     }
 
+    /// <summary>
+    /// A live video of a song (its own performance, so the song's timing does not fit it) is timed on its own audio:
+    /// what is said in its opening scene is not in the lyrics and is left out. A video that plays its song needs
+    /// nothing: the song's timing follows it (Arcanist's own tests cover that).
+    /// </summary>
+    [Fact]
+    public async Task A_live_video_is_timed_on_its_own_audio_without_its_dialogue()
+    {
+        var ffmpeg = FfmpegOnPath();
+        Assert.SkipWhen(ffmpeg is null, "ffmpeg is not installed");
+        Assert.SkipUnless(Arcanist.Core.Analysis.AudioAligner.IsAvailable, "the native library has no alignment");
+        AudioFixtures.WriteWav(Path.Combine(_music, "studio.wav"), 1,
+            new FixtureTags("Studio", "Band", Lyrics: "First line of words\nSecond line follows\nThird and last"));
+        Heard("Studio", ("First line of words", 4_000), ("Second line follows", 9_500), ("Third and last", 15_000));
+        // The concert: someone talks first, then the song, sung later and slower than in the studio.
+        Heard("Concert (Live)", ("Good evening everybody thanks for coming tonight", 1_000), ("First line of words", 8_000),
+            ("Second line follows", 15_000), ("Third and last", 22_000));
+        var wav = Path.Combine(_transcripts, "concert.wav");
+        await File.WriteAllBytesAsync(wav, AudioFixtures.Wav(AudioFixtures.Noise(7, 30)), Cancel);
+        var video = Path.Combine(_music, "Band - Concert (Live).mp4");
+        using (var process = System.Diagnostics.Process.Start(ffmpeg,
+                   ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=30", "-i", wav,
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", video]))
+            await process.WaitForExitAsync(Cancel);
+
+        _factory = new ArcanistFactory(new Dictionary<string, string?>
+        {
+            ["Arcanist:Analysis:Enabled"] = "true",
+            ["Arcanist:Ffmpeg:Path"] = ffmpeg,
+            ["Arcanist:Ffmpeg:SearchSystem"] = "false",
+            ["Arcanist:Extensions:lyrics-sync:Enabled"] = "true",
+            ["Arcanist:Extensions:lyrics-sync:Transcripts"] = _transcripts,
+        });
+        Directory.CreateDirectory(_factory.DataPath);
+        CopyFolder(Extension, Path.Combine(_factory.DataPath, "extensions", "lyrics-sync"));
+        await _factory.CompleteSetupAsync(new SetupLibrary("Music", [_music]));
+        _admin = await _factory.CreateAuthenticatedClientAsync();
+        await _factory.WaitForScansAsync(_admin);
+
+        var videos = await _admin.GetFromJsonAsync<JsonElement>("/rest/v1/videos", ArcanistFactory.Json, Cancel);
+        var id = videos.GetProperty("items")[0].GetProperty("id").GetString()!;
+        var trackId = await TrackIdAsync("Studio");
+        (await _admin.PutAsJsonAsync($"/rest/v1/videos/{id}/link", new { trackId }, ArcanistFactory.Json, Cancel)).EnsureSuccessStatusCode();
+
+        JsonElement lyrics = default;
+        for (var i = 0; i < 600; i++)
+        {
+            lyrics = await _admin.GetFromJsonAsync<JsonElement>($"/rest/v1/videos/{id}/lyrics", ArcanistFactory.Json, Cancel);
+            if (lyrics.GetProperty("sync").GetString() == "VIDEO")
+                break;
+            await Task.Delay(100, Cancel);
+        }
+
+        Assert.Equal("VIDEO", lyrics.GetProperty("sync").GetString());
+        Assert.Equal([(8_000, "First line of words"), (15_000, "Second line follows"), (22_000, "Third and last")],
+            lyrics.GetProperty("lines").EnumerateArray().Where(l => l.GetProperty("text").GetString()!.Length > 0)
+                .Select(l => (l.GetProperty("startMs").GetInt32(), l.GetProperty("text").GetString())));
+    }
+
     private async Task<JsonElement> ResyncAsync(string id)
     {
         var response = await _admin.PostAsync($"/rest/v1/tracks/{id}/lyrics/resync", null, Cancel);
@@ -213,6 +272,9 @@ public sealed class LyricsSyncTests : IAsyncLifetime
         Assert.Equal(expected.Length, times.Count);
         Assert.All(times.Zip(expected), t => Assert.InRange(t.First - t.Second, -500, 500));
     }
+
+    private static string? FfmpegOnPath() => (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+        .Select(d => Path.Combine(d, OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg")).FirstOrDefault(File.Exists);
 
     private static void CopyFolder(string from, string to)
     {

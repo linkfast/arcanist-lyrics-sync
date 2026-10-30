@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Arcanist.Core.Application.Catalog;
+using Arcanist.Core.Application.Videos;
 using Arcanist.Core.Media;
 using Arcanist.Extensibility;
 
@@ -15,6 +16,7 @@ public sealed class LyricsSyncAdminPage(
     AttemptStore attempts,
     AlignmentWorker worker,
     LyricsTiming timing,
+    VideoLyricsTimings videoTimings,
     FfmpegLocator ffmpeg) : IExtensionAdminPage
 {
     public async Task<AdminPage> GetAsync(AdminPageContext context, CancellationToken cancellationToken)
@@ -48,6 +50,9 @@ public sealed class LyricsSyncAdminPage(
         var tried = attempts.Counts();
         status.Add(AdminBlock.Status(t.TimedLabel, t.Timed(counts.Timed, counts.WithLyrics, counts.Aligned)));
         status.Add(AdminBlock.Status(t.LeftLabel, t.Left(counts.Untimed, counts.Waiting), help: t.LeftHelp));
+        var videos = await videoTimings.CountAsync(cancellationToken);
+        if (videos.Timed + videos.Untimed > 0)
+            status.Add(AdminBlock.Status(t.VideosLabel, t.Videos(videos.Timed, videos.Untimed), help: t.VideosHelp));
         if (tried.Rejected + tried.Failed > 0)
             status.Add(AdminBlock.Status(t.NotTimedLabel, t.NotTimed(tried.Rejected, tried.Failed), AdminTone.Neutral, t.NotTimedHelp));
         if (worker.LastError is { } error)
@@ -119,6 +124,7 @@ public sealed class LyricsSyncAdminPage(
                 return AdminPageResult.Done(t.Retrying(forgotten));
             case "clear":
                 var cleared = await timing.ClearAsync(null, cancellationToken);
+                await videoTimings.ClearAsync(cancellationToken);
                 attempts.ForgetAll();
                 worker.Restart();
                 return AdminPageResult.Done(t.Cleared(cleared));
@@ -168,6 +174,11 @@ public sealed class LyricsSyncAdminPage(
             : untimed.ToString();
         public string LeftHelp => S("Con LRCLib activado, sus tiempos (hechos por personas) van primero: aquí solo se calculan los que LRCLib no tiene.",
             "With LRCLib on, its timing (made by people) comes first: only what LRCLib does not have is worked out here.");
+        public string VideosLabel => S("Videoclips con audio propio", "Music videos with their own audio");
+        public string Videos(int timed, int untimed) => S($"{timed} con tiempos, {untimed} por sincronizar", $"{timed} timed, {untimed} left to time");
+        public string VideosHelp => S(
+            "Los videoclips que tocan su canción siguen los tiempos de la canción (sin letra sobre sus escenas). Los que tienen audio propio (en vivo, otra edición) se sincronizan con su audio, después de las canciones; lo que se habla en sus escenas no está en la letra y queda fuera.",
+            "Music videos that play their song follow the song's timing (no lyrics over their scenes). Those with audio of their own (live, another edit) are timed on their audio, after the songs; what is said in their scenes is not in the lyrics and is left out.");
         public string NotTimedLabel => S("Sin sincronizar", "Not timed");
         public string NotTimed(int rejected, int failed) =>
             S($"{rejected} no coinciden con lo que se canta, {failed} con errores", $"{rejected} do not match the singing, {failed} with errors");

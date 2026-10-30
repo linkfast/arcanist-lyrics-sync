@@ -17,6 +17,12 @@ out the timing of plain lyrics on your server, from the song itself, so players 
   (`resyncTrackLyrics`, `POST /rest/v1/tracks/{id}/lyrics/resync`; Arcanist 0.1.0-alpha.16 or newer), whatever timing
   it has (its file's, LRCLib's or one worked out here): it goes before everything else and is tried even if it was
   tried before. Its timing is replaced only when the words match the singing; otherwise it stays as it was.
+- **Music videos** (Arcanist 0.1.0-alpha.16 or newer). A video that plays its song needs nothing: Arcanist carries
+  the song's timing over to the stretches where the video plays it (`musicVideoLyrics`), so its scenes (an intro, a
+  dialogue, an outro) get no lyrics, a verse it cuts is left out and a chorus it repeats shows again. A video with
+  audio of its own (a live take, another edit, where the alignment found no match) is timed here on that audio, after
+  the songs and first when someone watches it: what is said in its scenes is not in the lyrics, so the matching
+  leaves it out.
 - **Nothing on disk is rewritten.** The timing lives in Arcanist's database; a rescan keeps it while the words stay
   the same.
 
