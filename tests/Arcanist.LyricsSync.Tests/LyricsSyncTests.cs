@@ -250,18 +250,23 @@ public sealed class LyricsSyncTests : IAsyncLifetime
         return await response.Content.ReadFromJsonAsync<JsonElement>(ArcanistFactory.Json, Cancel);
     }
 
-    /// <summary>The times of the song's lines once <paramref name="done"/> says so (or after 30 s).</summary>
+    /// <summary>
+    /// The times of the song's lines once <paramref name="done"/> says so; fails after 30 s. They are read again after
+    /// that: what said so may have been read together with lyrics from just before (Arcanist ends a re-sync after
+    /// saving its timing, and older servers read the lyrics before asking whether it was over).
+    /// </summary>
     private async Task<int[]> TimesWhenAsync(string id, Func<JsonElement, bool> done)
     {
-        JsonElement lyrics = default;
-        for (var i = 0; i < 300; i++)
+        var reached = false;
+        for (var i = 0; i < 300 && !reached; i++)
         {
-            lyrics = await LyricsAsync(id);
-            if (done(lyrics))
-                break;
-            await Task.Delay(100, Cancel);
+            reached = done(await LyricsAsync(id));
+            if (!reached)
+                await Task.Delay(100, Cancel);
         }
 
+        Assert.True(reached, "the song's lyrics never got there in 30 s");
+        var lyrics = await LyricsAsync(id);
         return lyrics.GetProperty("synced") is { ValueKind: JsonValueKind.Array } synced
             ? synced.EnumerateArray().Select(l => l.GetProperty("timeMs").GetInt32()).ToArray()
             : [];

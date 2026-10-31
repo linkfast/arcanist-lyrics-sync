@@ -21,6 +21,11 @@ public enum AttemptOutcome
     Rejected,
     /// <summary>Something failed (the file, ffmpeg): tried again a day later.</summary>
     Failed,
+    /// <summary>
+    /// Timed, but Arcanist did not keep it (its lyrics changed or got timing meanwhile, or the re-sync was over): not
+    /// tried again until the lyrics or the method change, like <see cref="Rejected"/>.
+    /// </summary>
+    NotSaved,
 }
 
 /// <param name="PlainHash">The lyrics it was for: other words are a new song to time.</param>
@@ -297,12 +302,21 @@ public sealed class AlignmentWorker(
             }
             else
             {
-                if (work.Video is { } video)
-                    await videoTimings.SaveAsync(video.VideoHash, song.PlainHash, Lrc.Format(aligned.Lines), cancellationToken);
+                var saved = work.Video is { } video
+                    ? await videoTimings.SaveAsync(video.VideoHash, song.PlainHash, Lrc.Format(aligned.Lines), cancellationToken)
+                    : await timing.SaveAsync(song.TrackId, song.PlainHash, Lrc.Format(aligned.Lines), cancellationToken);
+                if (saved)
+                {
+                    attempts.Record(song.TrackId, new Attempt(song.PlainHash, AttemptOutcome.Aligned, now, LyricsAligner.Version, aligned.Matched));
+                    logger.LogInformation("Lyrics Sync timed {Song} ({Matched:P0} of its words heard)", Current, aligned.Matched);
+                }
                 else
-                    await timing.SaveAsync(song.TrackId, song.PlainHash, Lrc.Format(aligned.Lines), cancellationToken);
-                attempts.Record(song.TrackId, new Attempt(song.PlainHash, AttemptOutcome.Aligned, now, LyricsAligner.Version, aligned.Matched));
-                logger.LogInformation("Lyrics Sync timed {Song} ({Matched:P0} of its words heard)", Current, aligned.Matched);
+                {
+                    attempts.Record(song.TrackId, new Attempt(song.PlainHash, AttemptOutcome.NotSaved, now, LyricsAligner.Version, aligned.Matched));
+                    logger.LogWarning(
+                        "Lyrics Sync timed {Song} ({Matched:P0} of its words heard), but Arcanist did not keep it: its lyrics changed or got timing meanwhile",
+                        Current, aligned.Matched);
+                }
             }
 
             LastError = null;
