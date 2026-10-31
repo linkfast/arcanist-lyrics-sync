@@ -143,6 +143,48 @@ public sealed class LyricsSyncTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// A song with no lyrics anywhere: a player asks for its words, the model writes them as a draft (cleaned up) that
+    /// waits for review, and the admin page links to the editor.
+    /// </summary>
+    [Fact]
+    public async Task A_song_without_lyrics_gets_a_recognized_draft_when_a_player_asks()
+    {
+        AudioFixtures.WriteWav(Path.Combine(_music, "unsung.wav"), 5, new FixtureTags("Unsung", "Band"));
+        Heard("Unsung", ("[Music]", 0), ("these are words nobody wrote down", 2_000), ("and the model heard them all", 6_000));
+
+        _factory = new ArcanistFactory(new Dictionary<string, string?>
+        {
+            ["Arcanist:Extensions:lyrics-sync:Enabled"] = "true",
+            ["Arcanist:Extensions:lyrics-sync:Transcripts"] = _transcripts,
+        });
+        Directory.CreateDirectory(_factory.DataPath);
+        CopyFolder(Extension, Path.Combine(_factory.DataPath, "extensions", "lyrics-sync"));
+        await _factory.CompleteSetupAsync(new SetupLibrary("Music", [_music]));
+        _admin = await _factory.CreateAuthenticatedClientAsync();
+        await _factory.WaitForScansAsync(_admin);
+
+        var id = await TrackIdAsync("Unsung");
+        (await _admin.PostAsync($"/rest/v1/tracks/{id}/lyrics/transcription", null, Cancel)).EnsureSuccessStatusCode();
+        JsonElement status = default;
+        for (var i = 0; i < 300; i++)
+        {
+            status = await _admin.GetFromJsonAsync<JsonElement>($"/rest/v1/tracks/{id}/lyrics/transcription", ArcanistFactory.Json, Cancel);
+            if (status.GetProperty("state").GetString() == "NEEDS_REVIEW")
+                break;
+            await Task.Delay(100, Cancel);
+        }
+
+        Assert.Equal("NEEDS_REVIEW", status.GetProperty("state").GetString());
+        Assert.Equal(["These are words nobody wrote down", "And the model heard them all"],
+            status.GetProperty("draft").GetProperty("lines").EnumerateArray().Select(l => l.GetProperty("text").GetString()));
+        // Not the song's lyrics until someone accepts them.
+        Assert.Equal(System.Net.HttpStatusCode.NotFound, (await _admin.GetAsync($"/rest/v1/tracks/{id}/lyrics", Cancel)).StatusCode);
+        var page = await _admin.GetStringAsync("/rest/v1/extensions/lyrics-sync/admin?language=en", Cancel);
+        Assert.Contains("/admin/lyrics/review", page);
+        Assert.Contains("Review 1", page);
+    }
+
+    /// <summary>
     /// A live video of a song (its own performance, so the song's timing does not fit it) is timed on its own audio:
     /// what is said in its opening scene is not in the lyrics and is left out. A video that plays its song needs
     /// nothing: the song's timing follows it (Arcanist's own tests cover that).

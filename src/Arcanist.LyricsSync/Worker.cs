@@ -119,12 +119,24 @@ public enum WorkerState
     Idle,
 }
 
-/// <summary>A song to time, or a music video timed on its own audio (<paramref name="Video"/>).</summary>
+/// <summary>
+/// A song to time, a music video timed on its own audio (<paramref name="Video"/>), or a song without lyrics whose
+/// words are recognized (<paramref name="Transcribe"/>).
+/// </summary>
 /// <param name="Lyrics">What the recognizer hears: the song's file, or the video's (keyed by the video's id).</param>
-internal sealed record TimingWork(UntimedLyrics Lyrics, UntimedVideoLyrics? Video = null)
+internal sealed record TimingWork(UntimedLyrics Lyrics, UntimedVideoLyrics? Video = null, bool Transcribe = false)
 {
+    /// <summary>What a recognition is tried for in <see cref="AttemptStore"/> (a song has no words to hash yet).</summary>
+    public const string TranscriptionKey = "transcription";
+
     public static TimingWork Of(UntimedVideoLyrics video) =>
         new(new UntimedLyrics(video.VideoId, video.Plain, video.PlainHash, video.Title, video.Artist, video.DurationMs, video.VideoPath, null, null), video);
+
+    public static TimingWork Of(UntranscribedSong song) =>
+        new(new UntimedLyrics(song.TrackId, "", TranscriptionKey, song.Title, song.Artist, song.DurationMs, song.AudioPath, song.StartMs, song.EndMs)
+        {
+            Forced = song.Forced,
+        }, Transcribe: true);
 }
 
 /// <summary>
@@ -137,10 +149,16 @@ internal sealed record TimingWork(UntimedLyrics Lyrics, UntimedVideoLyrics? Vide
 /// another edit: <see cref="VideoLyricsTimings"/>) are timed on that audio, after the songs: the words heard in their
 /// scenes are dialogue that does not match the lyrics, and the alignment leaves them out.
 /// </para>
+/// <para>
+/// Songs without lyrics have their words recognized (<see cref="LyricsTranscription"/>) when someone asks for them
+/// from a player, and in the background with <see cref="LyricsSyncSettings.Transcribe"/>, last of all. What the model
+/// writes is a draft for a person to review (<see cref="LyricsTranscriber"/> cleans it up first).
+/// </para>
 /// </summary>
 public sealed class AlignmentWorker(
     LyricsTiming timing,
     VideoLyricsTimings videoTimings,
+    LyricsTranscription transcription,
     Components components,
     SettingsStore settings,
     AttemptStore attempts,
@@ -158,9 +176,12 @@ public sealed class AlignmentWorker(
     private readonly Queue<UntimedLyrics> _resyncs = new();
     private readonly Queue<UntimedLyrics> _requested = new();
     private readonly Queue<UntimedVideoLyrics> _requestedVideos = new();
+    private readonly Queue<UntranscribedSong> _requestedTranscriptions = new();
     private Guid? _cursor;
     private Guid? _videoCursor;
-    private bool _songsDone;
+    private Guid? _transcriptionCursor;
+    /// <summary>Where the background pass is: songs to time, videos, songs to recognize.</summary>
+    private int _phase;
 
     public WorkerState State { get; private set; } = WorkerState.Off;
 
@@ -180,7 +201,8 @@ public sealed class AlignmentWorker(
     {
         _cursor = null;
         _videoCursor = null;
-        _songsDone = false;
+        _transcriptionCursor = null;
+        _phase = 0;
         Wake();
     }
 
@@ -193,6 +215,7 @@ public sealed class AlignmentWorker(
         var setup = services.GetRequiredService<IOptionsMonitor<SetupOptions>>();
         timing.Requested += Wake;
         videoTimings.Requested += Wake;
+        transcription.Requested += Wake;
         try
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -221,6 +244,7 @@ public sealed class AlignmentWorker(
         {
             timing.Requested -= Wake;
             videoTimings.Requested -= Wake;
+            transcription.Requested -= Wake;
         }
     }
 
@@ -235,6 +259,7 @@ public sealed class AlignmentWorker(
         if (recognizer.NeedsSetup && (Components.Platform is null || components.Missing(current).Count > 0))
         {
             timing.EndAllResyncs();
+            transcription.EndAll();
             return Set(WorkerState.NotReady, Rest);
         }
 
@@ -242,17 +267,20 @@ public sealed class AlignmentWorker(
         if (ffmpegPath is null)
         {
             timing.EndAllResyncs();
+            transcription.EndAll();
             return Set(WorkerState.NoFfmpeg, Rest);
         }
         if (scans.HasActiveJobs || streams.Active > 0)
             return Set(WorkerState.Paused, Pause);
 
-        if (await NextAsync(current.Background, cancellationToken) is not { } work)
+        if (await NextAsync(current, cancellationToken) is not { } work)
             return Set(WorkerState.Idle, Rest);
 
         var song = work.Lyrics;
         State = WorkerState.Working;
         Current = song.Artist is null ? song.Title : $"{song.Artist} · {song.Title}";
+        if (work.Transcribe)
+            return await TranscribeAsync(song, ffmpegPath, current, cancellationToken);
         try
         {
             var aligned = await RunLowAsync(() => recognizer.RecognizeAsync(song, ffmpegPath, current, cancellationToken), cancellationToken) is { } heard
@@ -297,6 +325,46 @@ public sealed class AlignmentWorker(
         return TimeSpan.Zero;
     }
 
+    /// <summary>Recognizes the words of a song without lyrics and saves them as a draft for review.</summary>
+    private async Task<TimeSpan> TranscribeAsync(UntimedLyrics song, string ffmpegPath, LyricsSyncSettings current, CancellationToken cancellationToken)
+    {
+        transcription.Start(song.TrackId);
+        try
+        {
+            var transcript = await RunLowAsync(() => recognizer.TranscribeAsync(song, ffmpegPath, current, cancellationToken), cancellationToken);
+            var lines = LyricsTranscriber.Lines(transcript);
+            var now = time.GetUtcNow().UtcDateTime;
+            if (lines is null)
+            {
+                transcription.End(song.TrackId, TranscriptionOutcome.NoVoice);
+                attempts.Record(song.TrackId, new Attempt(song.PlainHash, AttemptOutcome.Rejected, now, LyricsAligner.Version));
+                logger.LogInformation("Lyrics Sync heard no singing in {Song}", Current);
+            }
+            else
+            {
+                await transcription.SaveDraftAsync(song.TrackId, lines, transcript.Language, $"Lyrics Sync · Whisper {current.Model}", cancellationToken);
+                attempts.Record(song.TrackId, new Attempt(song.PlainHash, AttemptOutcome.Aligned, now, LyricsAligner.Version));
+                logger.LogInformation("Lyrics Sync wrote the words of {Song} ({Lines} lines) for review", Current, lines.Count);
+            }
+
+            LastError = null;
+        }
+        catch (Exception e) when (e is not OperationCanceledException)
+        {
+            logger.LogWarning(e, "Lyrics Sync could not recognize {Song}", Current);
+            LastError = $"{Current}: {e.Message}";
+            transcription.End(song.TrackId, TranscriptionOutcome.Failed);
+            attempts.Record(song.TrackId, new Attempt(song.PlainHash, AttemptOutcome.Failed, time.GetUtcNow().UtcDateTime, LyricsAligner.Version,
+                Error: e.Message));
+        }
+        finally
+        {
+            Current = null;
+        }
+
+        return TimeSpan.Zero;
+    }
+
     private TimeSpan Set(WorkerState state, TimeSpan wait)
     {
         State = state;
@@ -305,10 +373,12 @@ public sealed class AlignmentWorker(
 
     /// <summary>
     /// The next song: one a user asked to re-sync (always tried, whatever was tried before), one a listener asked for,
-    /// a video someone is watching, or (in the background) the next song left and, once they are done, the next video.
-    /// Videos are tried like songs (<see cref="AttemptStore"/>, by the video's id).
+    /// a video someone is watching, a song someone asked to have its words recognized (always tried), or in the
+    /// background the next song left to time (<see cref="LyricsSyncSettings.Background"/>), then the next video, then
+    /// the next song without lyrics (<see cref="LyricsSyncSettings.Transcribe"/>). Videos and recognitions are tried
+    /// like songs (<see cref="AttemptStore"/>, by the video's or the song's id).
     /// </summary>
-    private async Task<TimingWork?> NextAsync(bool background, CancellationToken cancellationToken)
+    private async Task<TimingWork?> NextAsync(LyricsSyncSettings current, CancellationToken cancellationToken)
     {
         var now = time.GetUtcNow().UtcDateTime;
         if (timing.TakeRequested() is { Count: > 0 } asked)
@@ -320,6 +390,11 @@ public sealed class AlignmentWorker(
         {
             foreach (var video in await videoTimings.FindAsync(watched, cancellationToken))
                 _requestedVideos.Enqueue(video);
+        }
+        if (transcription.TakeRequested() is { Count: > 0 } toRecognize)
+        {
+            foreach (var song in await transcription.FindAsync(toRecognize, cancellationToken))
+                _requestedTranscriptions.Enqueue(song);
         }
 
         if (_resyncs.TryDequeue(out var resync))
@@ -338,11 +413,15 @@ public sealed class AlignmentWorker(
                 return work;
         }
 
-        if (!background)
+        // Asked for by a person: whatever was tried before.
+        if (_requestedTranscriptions.TryDequeue(out var recognize))
+            return TimingWork.Of(recognize);
+
+        if (!current.Background && !current.Transcribe)
             return null;
-        if (!_songsDone)
+        if (_phase == 0)
         {
-            while (true)
+            while (current.Background)
             {
                 var page = await timing.PendingAsync(_cursor, PageSize, cancellationToken);
                 if (page.Count == 0)
@@ -355,31 +434,50 @@ public sealed class AlignmentWorker(
                 }
             }
 
-            _songsDone = true;
+            _phase = 1;
         }
 
-        while (true)
+        if (_phase == 1)
         {
-            var (videos, last) = await videoTimings.PendingAsync(_videoCursor, PageSize, cancellationToken);
-            if (last is null)
+            while (current.Background)
             {
-                // A whole pass done (songs and videos): the next one starts from the beginning.
-                _cursor = null;
-                _videoCursor = null;
-                _songsDone = false;
-                return null;
+                var (videos, last) = await videoTimings.PendingAsync(_videoCursor, PageSize, cancellationToken);
+                if (last is null)
+                    break;
+                foreach (var video in videos)
+                {
+                    _videoCursor = video.VideoId;
+                    var work = TimingWork.Of(video);
+                    if (attempts.ShouldTry(work.Lyrics, now))
+                        return work;
+                }
+
+                _videoCursor = last;
             }
 
-            foreach (var video in videos)
+            _phase = 2;
+        }
+
+        while (current.Transcribe)
+        {
+            var page = await transcription.PendingAsync(_transcriptionCursor, PageSize, cancellationToken);
+            if (page.Count == 0)
+                break;
+            foreach (var song in page)
             {
-                _videoCursor = video.VideoId;
-                var work = TimingWork.Of(video);
+                _transcriptionCursor = song.TrackId;
+                var work = TimingWork.Of(song);
                 if (attempts.ShouldTry(work.Lyrics, now))
                     return work;
             }
-
-            _videoCursor = last;
         }
+
+        // A whole pass done: the next one starts from the beginning.
+        _cursor = null;
+        _videoCursor = null;
+        _transcriptionCursor = null;
+        _phase = 0;
+        return null;
     }
     /// <summary>On a dedicated below-normal thread: timing lyrics must never slow down streaming or the API.</summary>
     private static Task<T> RunLowAsync<T>(Func<Task<T>> work, CancellationToken cancellationToken) =>

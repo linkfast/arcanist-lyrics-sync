@@ -10,8 +10,8 @@ using Whisper.net.LibraryLoader;
 
 namespace Arcanist.LyricsSync;
 
-/// <summary>A word heard in the song, and when.</summary>
-public sealed record HeardWord(string Text, int StartMs, int EndMs);
+/// <summary>A word heard in the song, and when; <paramref name="Probability"/> is how sure the model is of it (0–1).</summary>
+public sealed record HeardWord(string Text, int StartMs, int EndMs, double? Probability = null);
 
 /// <summary>Hears the words sung in a song.</summary>
 public interface ISpeechRecognizer
@@ -21,6 +21,12 @@ public interface ISpeechRecognizer
 
     /// <summary>The words, in order; empty when nothing was sung.</summary>
     Task<IReadOnlyList<HeardWord>> RecognizeAsync(UntimedLyrics song, string ffmpeg, LyricsSyncSettings settings, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Everything sung in a song with no lyrics (<see cref="UntimedLyrics.Plain"/> is empty), with each word's
+    /// probability, the language and how loud the voice is along the song.
+    /// </summary>
+    Task<Transcript> TranscribeAsync(UntimedLyrics song, string ffmpeg, LyricsSyncSettings settings, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -37,6 +43,30 @@ public sealed class WhisperRecognizer(Components components, ILogger<WhisperReco
 
     public async Task<IReadOnlyList<HeardWord>> RecognizeAsync(UntimedLyrics song, string ffmpeg, LyricsSyncSettings settings, CancellationToken cancellationToken)
     {
+        var voice = await VoiceAsync(song, ffmpeg, settings, cancellationToken);
+        return await TranscribeAsync(voice, song.Plain, settings, cancellationToken);
+    }
+
+    public async Task<Transcript> TranscribeAsync(UntimedLyrics song, string ffmpeg, LyricsSyncSettings settings, CancellationToken cancellationToken)
+    {
+        var voice = await VoiceAsync(song, ffmpeg, settings, cancellationToken);
+        using var factory = Factory(settings);
+        await using var processor = factory.CreateBuilder()
+            .WithLanguage("auto")
+            .WithThreads(settings.Threads)
+            .WithTokenTimestamps()
+            .WithProbabilities()
+            .WithNoContext()
+            .Build();
+        var language = new string?[1];
+        var words = await HearAsync(processor, voice, 0, cancellationToken, language);
+        logger.LogDebug("Heard {Count} words ({Language})", words.Count, language[0]);
+        return new Transcript(words, language[0], Levels(voice));
+    }
+
+    /// <summary>The song's voice at Whisper's rate: separated from the music when the settings say so, or the whole song.</summary>
+    private async Task<float[]> VoiceAsync(UntimedLyrics song, string ffmpeg, LyricsSyncSettings settings, CancellationToken cancellationToken)
+    {
         PrepareNatives();
         float[] voice;
         if (settings.SeparateVocals)
@@ -51,8 +81,33 @@ public sealed class WhisperRecognizer(Components components, ILogger<WhisperReco
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        return await TranscribeAsync(voice, song.Plain, settings, cancellationToken);
+        return voice;
     }
+
+    /// <summary>How loud the voice is (RMS) every <see cref="Transcript.VoiceFrameMs"/>.</summary>
+    private static float[] Levels(float[] voice)
+    {
+        var frame = WhisperRate * Transcript.VoiceFrameMs / 1000;
+        var levels = new float[(voice.Length + frame - 1) / frame];
+        for (var f = 0; f < levels.Length; f++)
+        {
+            double sum = 0;
+            var end = Math.Min(voice.Length, (f + 1) * frame);
+            for (var i = f * frame; i < end; i++)
+                sum += voice[i] * voice[i];
+            levels[f] = (float)Math.Sqrt(sum / Math.Max(1, end - f * frame));
+        }
+
+        return levels;
+    }
+
+    private WhisperFactory Factory(LyricsSyncSettings settings) => WhisperFactory.FromPath(components.ModelPath(settings.Model), new WhisperFactoryOptions
+    {
+        UseGpu = false,
+        // Cross-attention timing per token: much closer to when each word is sung than the decoder's own.
+        UseDtwTimeStamps = true,
+        HeadsPreset = WhisperAlignmentHeadsPreset.Small,
+    });
 
     /// <summary>The voice of the song, in mono.</summary>
     private float[] Separate(float[][] stereo, int threads)
@@ -82,13 +137,7 @@ public sealed class WhisperRecognizer(Components components, ILogger<WhisperReco
     private async Task<IReadOnlyList<HeardWord>> TranscribeAsync(float[] samples, string lyrics, LyricsSyncSettings settings,
         CancellationToken cancellationToken)
     {
-        using var factory = WhisperFactory.FromPath(components.ModelPath(settings.Model), new WhisperFactoryOptions
-        {
-            UseGpu = false,
-            // Cross-attention timing per token: much closer to when each word is sung than the decoder's own.
-            UseDtwTimeStamps = true,
-            HeadsPreset = WhisperAlignmentHeadsPreset.Small,
-        });
+        using var factory = Factory(settings);
         await using var processor = factory.CreateBuilder()
             .WithLanguage("auto")
             .WithThreads(settings.Threads)
@@ -114,13 +163,19 @@ public sealed class WhisperRecognizer(Components components, ILogger<WhisperReco
         return words;
     }
 
-    /// <summary>The words Whisper hears in these samples, at <paramref name="offsetMs"/> in the song.</summary>
-    private static async Task<List<HeardWord>> HearAsync(WhisperProcessor processor, float[] samples, int offsetMs, CancellationToken cancellationToken)
+    /// <summary>
+    /// The words Whisper hears in these samples, at <paramref name="offsetMs"/> in the song, each with the mean
+    /// probability of its tokens; the language it heard goes in <paramref name="language"/>, when given.
+    /// </summary>
+    private static async Task<List<HeardWord>> HearAsync(WhisperProcessor processor, float[] samples, int offsetMs, CancellationToken cancellationToken,
+        string?[]? language = null)
     {
         var words = new List<HeardWord>();
-        (string Text, long Start, long End)? word = null;
+        (string Text, long Start, long End, double Probability, int Tokens)? word = null;
         await foreach (var segment in processor.ProcessAsync(samples, cancellationToken))
         {
+            if (language is not null && language[0] is null && !string.IsNullOrEmpty(segment.Language) && segment.Language != "auto")
+                language[0] = segment.Language;
             foreach (var token in segment.Tokens)
             {
                 var text = token.Text;
@@ -131,11 +186,11 @@ public sealed class WhisperRecognizer(Components components, ILogger<WhisperReco
                 if (word is null || char.IsWhiteSpace(text[0]))
                 {
                     Flush();
-                    word = (text.Trim(), start, token.End);
+                    word = (text.Trim(), start, token.End, token.Probability, 1);
                 }
                 else
                 {
-                    word = (word.Value.Text + text, word.Value.Start, token.End);
+                    word = (word.Value.Text + text, word.Value.Start, token.End, word.Value.Probability + token.Probability, word.Value.Tokens + 1);
                 }
             }
 
@@ -149,7 +204,8 @@ public sealed class WhisperRecognizer(Components components, ILogger<WhisperReco
         {
             if (word is { } w && w.Text.Length > 0)
                 // whisper.cpp counts time in hundredths of a second.
-                words.Add(new HeardWord(w.Text, offsetMs + (int)(w.Start * 10), offsetMs + (int)(Math.Max(w.Start, w.End) * 10)));
+                words.Add(new HeardWord(w.Text, offsetMs + (int)(w.Start * 10), offsetMs + (int)(Math.Max(w.Start, w.End) * 10),
+                    Math.Round(Math.Clamp(w.Probability / w.Tokens, 0, 1), 3)));
             word = null;
         }
     }
@@ -296,6 +352,10 @@ public sealed class ReplayRecognizer(string folder) : ISpeechRecognizer
         await using var stream = File.OpenRead(file);
         return await System.Text.Json.JsonSerializer.DeserializeAsync<List<HeardWord>>(stream, Json.Options, cancellationToken) ?? [];
     }
+
+    /// <summary>The same words, as everything sung in a song without lyrics (no voice levels nor language).</summary>
+    public async Task<Transcript> TranscribeAsync(UntimedLyrics song, string ffmpeg, LyricsSyncSettings settings, CancellationToken cancellationToken) =>
+        new(await RecognizeAsync(song, ffmpeg, settings, cancellationToken), null, null);
 }
 
 internal static class Versions

@@ -23,6 +23,14 @@ out the timing of plain lyrics on your server, from the song itself, so players 
   audio of its own (a live take, another edit, where the alignment found no match) is timed here on that audio, after
   the songs and first when someone watches it: what is said in its scenes is not in the lyrics, so the matching
   leaves it out.
+- **Lyrics for songs that have none** (Arcanist 0.1.0-alpha.16 or newer). A player can ask for a song without lyrics
+  anywhere (not in the file, not on LRCLib) to have its words recognized (`requestLyricsTranscription`); with
+  *Recognize the lyrics of songs that have none* on (off by default), the extension also does it in the background,
+  last of all. Whisper writes what is sung; what it makes up over instrumentals (credits, thanks, loops) and words
+  where the separated voice is silent are left out, and it is cut into lines at pauses and sentence ends, each with
+  the model's confidence. It is only a **draft**: nobody sees it as the song's lyrics until someone allowed to edit
+  tags corrects and accepts it, in the panel's editor (*Review lyrics*, linked from the extension's page) or in a
+  player's own.
 - **Nothing on disk is rewritten.** The timing lives in Arcanist's database; a rescan keeps it while the words stay
   the same.
 

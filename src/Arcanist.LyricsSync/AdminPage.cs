@@ -17,6 +17,7 @@ public sealed class LyricsSyncAdminPage(
     AlignmentWorker worker,
     LyricsTiming timing,
     VideoLyricsTimings videoTimings,
+    LyricsTranscription transcription,
     FfmpegLocator ffmpeg) : IExtensionAdminPage
 {
     public async Task<AdminPage> GetAsync(AdminPageContext context, CancellationToken cancellationToken)
@@ -53,6 +54,10 @@ public sealed class LyricsSyncAdminPage(
         var videos = await videoTimings.CountAsync(cancellationToken);
         if (videos.Timed + videos.Untimed > 0)
             status.Add(AdminBlock.Status(t.VideosLabel, t.Videos(videos.Timed, videos.Untimed), help: t.VideosHelp));
+        var recognized = await transcription.CountAsync(cancellationToken);
+        status.Add(AdminBlock.Link(t.DraftsLabel, t.Drafts(recognized.Drafts), "/admin/lyrics/review", t.DraftsHelp));
+        if (current.Transcribe)
+            status.Add(AdminBlock.Status(t.WithoutLyricsLabel, recognized.WithoutLyrics.ToString()));
         if (tried.Rejected + tried.Failed > 0)
             status.Add(AdminBlock.Status(t.NotTimedLabel, t.NotTimed(tried.Rejected, tried.Failed), AdminTone.Neutral, t.NotTimedHelp));
         if (worker.LastError is { } error)
@@ -71,6 +76,7 @@ public sealed class LyricsSyncAdminPage(
             new AdminSection("settings", t.SettingsTitle, null,
             [
                 AdminBlock.Field("background", t.Background, AdminFieldType.Switch, current.Background, t.BackgroundHelp),
+                AdminBlock.Field("transcribe", t.Transcribe, AdminFieldType.Switch, current.Transcribe, t.TranscribeHelp),
                 AdminBlock.Field("separateVocals", t.Separate, AdminFieldType.Switch, current.SeparateVocals, t.SeparateHelp),
                 AdminBlock.Field("model", t.ModelLabel, AdminFieldType.Select, current.Model.ToString(), t.ModelHelp, options: models),
                 AdminBlock.Field("threads", t.Threads, AdminFieldType.Number, current.Threads, t.ThreadsHelp, min: 1, max: LyricsSyncSettings.MaxThreads),
@@ -97,7 +103,8 @@ public sealed class LyricsSyncAdminPage(
             Switch("background") ?? current.Background,
             values.TryGetValue("threads", out var threads) && threads.ValueKind == JsonValueKind.Number ? threads.GetInt32() : current.Threads,
             Switch("separateVocals") ?? current.SeparateVocals,
-            model).Normalized();
+            model,
+            Switch("transcribe") ?? current.Transcribe).Normalized();
         settings.Save(saved);
         components.RemoveUnused(saved);
         // What the new settings need comes down now (the administrator already agreed to the extension's downloads).
@@ -179,6 +186,16 @@ public sealed class LyricsSyncAdminPage(
         public string VideosHelp => S(
             "Los videoclips que tocan su canción siguen los tiempos de la canción (sin letra sobre sus escenas). Los que tienen audio propio (en vivo, otra edición) se sincronizan con su audio, después de las canciones; lo que se habla en sus escenas no está en la letra y queda fuera.",
             "Music videos that play their song follow the song's timing (no lyrics over their scenes). Those with audio of their own (live, another edit) are timed on their audio, after the songs; what is said in their scenes is not in the lyrics and is left out.");
+        public string DraftsLabel => S("Letras reconocidas por revisar", "Recognized lyrics to review");
+        public string Drafts(int count) => count == 0 ? S("Abrir el editor", "Open the editor") : S($"Revisar {count}", $"Review {count}");
+        public string DraftsHelp => S(
+            "Las letras que el modelo escribe para canciones sin letra no se muestran hasta que alguien con permiso para editar etiquetas las corrige y las acepta en el editor.",
+            "The lyrics the model writes for songs with none are not shown until someone allowed to edit tags corrects and accepts them in the editor.");
+        public string WithoutLyricsLabel => S("Canciones sin letra por reconocer", "Songs without lyrics left to recognize");
+        public string Transcribe => S("Reconocer las letras de canciones que no la tienen", "Recognize the lyrics of songs that have none");
+        public string TranscribeHelp => S(
+            "En segundo plano, después de sincronizar: escribe la letra de las canciones que no tienen ninguna (ni en el archivo ni en LRCLib) como borrador para revisar. Los reproductores pueden pedirla para una canción aunque esté apagado. El modelo se equivoca a menudo con voces difíciles: siempre hace falta revisarla.",
+            "In the background, after timing: writes the lyrics of songs that have none (neither in the file nor on LRCLib) as a draft to review. Players can ask for a song's even when this is off. The model often gets difficult voices wrong: it always needs reviewing.");
         public string NotTimedLabel => S("Sin sincronizar", "Not timed");
         public string NotTimed(int rejected, int failed) =>
             S($"{rejected} no coinciden con lo que se canta, {failed} con errores", $"{rejected} do not match the singing, {failed} with errors");

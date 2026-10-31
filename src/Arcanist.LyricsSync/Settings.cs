@@ -15,7 +15,11 @@ public enum SpeechModel
 /// <param name="Background">Times every song that needs it, in the background; when off, only the songs listeners look at.</param>
 /// <param name="Threads">CPU threads for the work of one song (one song at a time).</param>
 /// <param name="SeparateVocals">Takes the voice out of the music before recognizing it: slower, much more accurate.</param>
-public sealed record LyricsSyncSettings(bool Background, int Threads, bool SeparateVocals, SpeechModel Model)
+/// <param name="Transcribe">
+/// Also writes, in the background, the words of songs that have no lyrics anywhere (a draft each, for a person to
+/// review). Off by default; a song someone asks for from a player is recognized either way.
+/// </param>
+public sealed record LyricsSyncSettings(bool Background, int Threads, bool SeparateVocals, SpeechModel Model, bool Transcribe = false)
 {
     public const int MaxThreads = 16;
 
