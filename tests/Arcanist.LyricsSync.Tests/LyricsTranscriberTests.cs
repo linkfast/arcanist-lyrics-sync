@@ -19,6 +19,16 @@ public class LyricsTranscriberTests
     }
 
     [Fact]
+    public void Japanese_pieces_are_joined_without_spaces_and_its_sentence_ends_cut_lines()
+    {
+        var lines = LyricsTranscriber.Lines(new Transcript(
+            [.. Sung("君の 名前を 呼んだ。 夜空に 光る 星", 1_000), .. Sung("Baby I love you", 5_000), .. Sung("また 会える 日まで", 8_000)],
+            "ja", null))!;
+
+        Assert.Equal(["君の名前を呼んだ", "夜空に光る星", "Baby I love you", "また会える日まで"], lines.Select(l => l.Text));
+    }
+
+    [Fact]
     public void A_long_instrumental_gets_a_break_and_what_whisper_makes_up_is_left_out()
     {
         var lines = LyricsTranscriber.Lines(new Transcript(

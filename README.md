@@ -11,6 +11,10 @@ out the timing of plain lyrics on your server, from the song itself, so players 
   are matched to the lyrics as two sequences (misheard, missed and extra words do not shift the rest). Each line
   takes the moment of its first word; parts where whole lines went unheard are listened to again on their own. If
   less than half the lyrics match (another version, another language, a live take), nothing is saved.
+- **Any language Whisper knows.** Languages written without spaces (Japanese, Chinese, Thai…) are matched character by
+  character, and Japanese katakana and hiragana count as the same (since 0.4.0-alpha.1; songs given up on before are
+  tried again). Lyrics written in kanji where Whisper writes kana (or the other way round) match less, and Whisper's
+  small model hears some languages less well than English or Spanish.
 - **In the background, at low priority.** One song at a time, waiting while Arcanist scans or someone listens; the
   songs a listener opens go first. Players get the timing through Arcanist's lyrics API (`syncedSource: ALIGNED`).
 - **Re-sync on request.** A user who may edit tags (`EDIT_METADATA`) can ask for one song to be timed again

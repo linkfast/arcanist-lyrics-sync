@@ -12,11 +12,13 @@ public sealed record AlignedLyrics(IReadOnlyList<(int TimeMs, string Text)> Line
 /// Matches the words heard in a song to its known lyrics and gives each line the time its first word is sung.
 /// Both sides are normalized (case, accents, punctuation) and aligned as sequences (Needleman-Wunsch), so missed,
 /// extra and misheard words do not shift the rest; words found are anchors, the others are placed between them.
+/// Languages written without spaces (Japanese, Chinese, Thai…) are compared character by character, with katakana
+/// and hiragana as the same: a line of them would otherwise be one long "word" nothing heard is like.
 /// </summary>
 public static partial class LyricsAligner
 {
     /// <summary>Changes when the method changes: songs given up on are tried again with a new one.</summary>
-    public const int Version = 1;
+    public const int Version = 2;
 
     /// <summary>Below this share of the lyrics' words heard, the lyrics are not this song's (or nothing was understood).</summary>
     public const double MinimumMatched = 0.5;
@@ -40,7 +42,7 @@ public static partial class LyricsAligner
         if (lyricWords.Count == 0)
             return null;
 
-        var heardWords = heard.Select(h => (Word: Normalize(h.Text), h.StartMs, h.EndMs)).Where(h => h.Word.Length > 0).ToList();
+        var heardWords = HeardTokens(heard);
         var anchors = Anchors(lyricWords.Select(w => w.Word).ToList(), heardWords.Select(h => h.Word).ToList());
         var matched = (double)anchors.Count(a => a >= 0) / lyricWords.Count;
         if (matched < MinimumMatched)
@@ -86,7 +88,7 @@ public static partial class LyricsAligner
         var lyricWords = new List<(string Word, int Line)>();
         for (var i = 0; i < lines.Count; i++)
             lyricWords.AddRange(lines[i].Words.Select(w => (w, i)));
-        var heardWords = heard.Select(h => (Word: Normalize(h.Text), h.StartMs, h.EndMs)).Where(h => h.Word.Length > 0).ToList();
+        var heardWords = HeardTokens(heard);
         if (lyricWords.Count == 0 || heardWords.Count == 0)
             return [];
 
@@ -136,16 +138,66 @@ public static partial class LyricsAligner
             .Where(l => l.Words.Count > 0)
             .ToList();
 
-    internal static List<string> Words(string text) =>
-        Normalize(text).Split(' ', StringSplitOptions.RemoveEmptyEntries).ToList();
+    internal static List<string> Words(string text) => Tokens(Normalize(text));
 
-    /// <summary>Lower case, without accents, apostrophes or punctuation: what is compared.</summary>
+    /// <summary>
+    /// The words heard, as the units compared: a word in a language written without spaces is split into its
+    /// characters, each with its share of the word's time.
+    /// </summary>
+    internal static List<(string Word, int StartMs, int EndMs)> HeardTokens(IReadOnlyList<HeardWord> heard)
+    {
+        var tokens = new List<(string, int, int)>();
+        foreach (var word in heard)
+        {
+            var parts = Tokens(Normalize(word.Text));
+            var span = Math.Max(0, word.EndMs - word.StartMs);
+            for (var i = 0; i < parts.Count; i++)
+                tokens.Add((parts[i], word.StartMs + span * i / parts.Count, word.StartMs + span * (i + 1) / parts.Count));
+        }
+
+        return tokens;
+    }
+
+    /// <summary>The units of normalized text: its words, and each character of a script written without spaces.</summary>
+    internal static List<string> Tokens(string normalized)
+    {
+        var tokens = new List<string>();
+        foreach (var word in normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var run = new StringBuilder();
+            foreach (var c in word)
+            {
+                if (Unspaced(c))
+                {
+                    if (run.Length > 0)
+                        tokens.Add(run.ToString());
+                    run.Clear();
+                    tokens.Add(c.ToString());
+                }
+                else
+                    run.Append(c);
+            }
+
+            if (run.Length > 0)
+                tokens.Add(run.ToString());
+        }
+
+        return tokens;
+    }
+
+    /// <summary>A letter of a script written without spaces between words: Han, kana, Thai, Lao, Khmer, Myanmar.</summary>
+    internal static bool Unspaced(char c) =>
+        c is >= '\u3040' and <= '\u30FF' or >= '\u31F0' and <= '\u31FF' or >= '\u3400' and <= '\u4DBF' or >= '\u4E00' and <= '\u9FFF'
+            or >= '\uF900' and <= '\uFAFF' or >= '\u0E00' and <= '\u0EFF' or >= '\u1780' and <= '\u17FF' or >= '\u1000' and <= '\u109F';
+
+    /// <summary>Lower case, without accents, apostrophes or punctuation, katakana as hiragana: what is compared.</summary>
     public static string Normalize(string text)
     {
-        var folded = TextNormalizer.Normalize(text.Replace("'", "").Replace("’", ""));
+        // Full-width letters and half-width katakana as their usual forms first.
+        var folded = TextNormalizer.Normalize(text.Normalize(NormalizationForm.FormKC).Replace("'", "").Replace("’", ""));
         var builder = new StringBuilder(folded.Length);
         foreach (var c in folded)
-            builder.Append(char.IsLetterOrDigit(c) ? c : ' ');
+            builder.Append(c is >= '\u30A1' and <= '\u30F6' ? (char)(c - 0x60) : char.IsLetterOrDigit(c) || c == '\u30FC' ? c : ' ');
         return string.Join(' ', builder.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries));
     }
 

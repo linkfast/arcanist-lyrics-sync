@@ -98,9 +98,9 @@ public static class LyricsTranscriber
         if (next.StartMs - last.EndMs >= LinePauseMs || line.Count >= MaxWordsPerLine)
             return true;
         var ending = last.Text.TrimEnd().LastOrDefault();
-        if (ending is '.' or '?' or '!' && line.Count >= 3)
+        if (ending is '.' or '?' or '!' or '。' or '？' or '！' && line.Count >= 3)
             return true;
-        return ending is ',' or ';' && line.Count >= 7;
+        return ending is ',' or ';' or '、' or '，' && line.Count >= 7;
     }
 
     /// <summary>
@@ -153,10 +153,21 @@ public static class LyricsTranscriber
         return t.Length == 0 || t.All(c => c is '♪' or '♫' or '*' or '-' or '…') || (t[0] is '[' or '(' && t[^1] is ']' or ')');
     }
 
-    /// <summary>A line's text: its words, without a final period or comma (lyrics are not prose), starting with a capital.</summary>
+    /// <summary>
+    /// A line's text: its words, without a final period or comma (lyrics are not prose), starting with a capital. Pieces
+    /// of a language written without spaces (Japanese, Chinese, Thai…) are joined without one.
+    /// </summary>
     private static string Text(List<HeardWord> words)
     {
-        var text = string.Join(' ', words.Select(w => Clean(w.Text))).Trim().TrimEnd('.', ',', ';', ':');
+        var builder = new StringBuilder();
+        foreach (var piece in words.Select(w => Clean(w.Text)).Where(p => p.Length > 0))
+        {
+            if (builder.Length > 0 && !(LyricsAligner.Unspaced(builder[^1]) && LyricsAligner.Unspaced(piece[0])))
+                builder.Append(' ');
+            builder.Append(piece);
+        }
+
+        var text = builder.ToString().Trim().TrimEnd('.', ',', ';', ':', '。', '、', '，');
         return text.Length == 0 ? text : char.ToUpper(text[0], CultureInfo.InvariantCulture) + text[1..];
     }
 
